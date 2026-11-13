@@ -49,6 +49,16 @@ uv run ruff check . && uv run ruff format --check .
 переменными окружения `DATABASE_URL` и `TEST_DATABASE_URL` (значения по умолчанию подходят для
 `docker-compose.yml`, см. `.env.example`).
 
+## Как проверить сценарии из ТЗ
+
+| Сценарий | Автотесты | Руками |
+|---|---|---|
+| Учёт после прихода, резерва, перемещения, отправки и приёмки | `test_api.py::test_full_scenario_over_http`, `test_shipments.py::test_transfer_full_cycle`, `test_fbo_full_cycle`, `test_seed.py::test_stock_equals_history` | пройти действия в интерфейсе, затем выполнить SQL-сверку (ниже) |
+| Нехватка на выбранном ФФ | `test_fbs.py::test_shortage_on_chosen_warehouse_with_enough_total`, `test_shipments.py::test_fbo_shortage_does_not_pick_other_warehouse` | зарезервировать 8 из 10 на Севере, затем ещё 5: отказ с подсказкой «Юг 6» |
+| Удаление ФФ с остатком | `test_warehouses.py::test_archive_warehouse_with_stock_keeps_everything`, `test_archived_warehouse_rejects_new_operations_but_allows_evacuation`, `test_cannot_archive_with_active_reservation` | «Склады» → «Удалить» у склада с товаром: склад в архиве, остаток виден |
+| Повторное подтверждение | `test_fbs.py::test_double_ship_does_not_write_off_twice`, `test_shipments.py::test_double_receive_does_not_add_stock_twice`, `test_api.py::test_double_confirmation_over_http` | в Swagger (`/docs`) вызвать `POST /api/fbs/{id}/ship` дважды: второй ответ 409 |
+| Одновременные запросы | `test_concurrency.py` (10 тестов), например `test_parallel_double_ship_writes_off_once` | `uv run pytest tests/test_concurrency.py -v` |
+
 ## Как пользоваться
 
 Меню слева (на телефоне внизу): **Остатки**, **Ждут действия** (со счётчиком), **История**, **Склады**.
@@ -159,35 +169,17 @@ Swagger — `/docs`. Ошибки всегда в одном формате:
 `conflict` (409), `insufficient_stock` (409), `concurrent_conflict` (409), `internal_error` (500).
 Числа принимаются строго как целые (`"5"`, `5.5`, `true` отклоняются).
 
-| Метод и путь | Действие |
-|---|---|
-| `GET /api/stock`, `/api/operations/open`, `/api/history`, `/api/warehouses` | чтение |
-| `POST /api/receipts` | приход |
-| `POST /api/fbs/reservations`, `/api/fbs/{id}/cancel`, `/api/fbs/{id}/ship` | резерв, отмена, отправка клиенту |
-| `POST /api/transfers`, `/api/transfers/{id}/receive` | перемещение между ФФ, приёмка |
-| `POST /api/fbo`, `/api/fbo/{id}/receive` | отправка FBO, приёмка |
-| `POST /api/adjustments` | исправить остаток (с причиной) |
-| `POST /api/warehouses`, `PATCH /api/warehouses/{id}`, `POST /api/warehouses/{id}/archive` | склады |
+Полный список методов — в Swagger. Чтение: `GET /api/stock`, `/operations/open`, `/history`,
+`/warehouses`. Команды: `POST /api/receipts`, `/fbs/reservations`, `/fbs/{id}/cancel|ship`,
+`/transfers`, `/transfers/{id}/receive`, `/fbo`, `/fbo/{id}/receive`, `/adjustments`, склады — под
+`/api/warehouses`.
 
 ## Структура
 
-```
-app/
-  main.py           приложение, единый формат ошибок
-  api/routes.py     тонкие роуты и Pydantic-схемы (бизнес-логики нет)
-  services/         вся бизнес-логика и транзакции
-    stock.py        приход, блокировки, проверка доступного, подсказка при нехватке
-    fbs.py          резерв, отмена, отправка клиенту
-    shipments.py    перемещения и FBO
-    warehouses.py   создать, переименовать, архивировать
-    adjustments.py  исправление остатка
-    queries.py      чтение без N+1
-  models.py         таблицы и ограничения БД
-  seed.py           тестовые данные через приходы
-  templates/, static/   интерфейс
-alembic/versions/   миграции
-tests/              сервисные, API, инварианты, конкурентные
-```
+Роуты в `app/api/routes.py` тонкие, вся бизнес-логика и транзакции в `app/services/` (`stock.py` —
+приход, блокировки, нехватка; `fbs.py`; `shipments.py` — перемещения и FBO; `warehouses.py`;
+`adjustments.py`; `queries.py` — чтение). Таблицы и ограничения БД — `app/models.py`, миграции —
+`alembic/versions/`, интерфейс — `app/templates/` и `app/static/`, тесты — `tests/`.
 
 ## Допущения (не из ТЗ)
 
@@ -213,8 +205,10 @@ tests/              сервисные, API, инварианты, конкур�
 
 * Сквозные сценарии ТЗ по шагам с проверкой сходимости остатков с историей после **каждого** действия.
 * Конкурентные тесты на независимых соединениях PostgreSQL. Чтобы убедиться, что тесты вообще
-  ловят гонку, я временно убрал `FOR UPDATE`: 5 из 9 тестов упали, затем блокировка возвращена.
+  ловят гонку, я временно убрал `FOR UPDATE`: упала 5 из 9 конкурентных тестов, существовавших на
+  тот момент (сейчас их 10), затем блокировка возвращена.
 * Проверка в браузере, проверка данных напрямую в БД и после перезапуска сервера, SQL-сверка
   остатков с историей (выше).
-* Независимый разбор кода как ревьюера: найдено и исправлено, что deadlock в БД превращался бы в
-  голый 500 (теперь понятный ответ, с тестом).
+* Повторный разбор кода после написания (его делал тот же ИИ, поэтому это самопроверка, а не
+  независимое ревью): нашлось, что deadlock в БД превращался бы в голый 500, теперь это понятный
+  ответ 409, есть тест.
