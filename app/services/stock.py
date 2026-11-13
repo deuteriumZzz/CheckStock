@@ -77,7 +77,13 @@ def log_event(
     )
 
 
-def receive_in_tx(s: Session, warehouse_id: int, product_id: int, quantity: int) -> Operation:
+def receive_in_tx(
+    s: Session,
+    warehouse_id: int,
+    product_id: int,
+    quantity: int,
+    idempotency_key: str | None = None,
+) -> Operation:
     """Приход без commit — чтобы seed мог объединить несколько приходов в одну транзакцию."""
     check_quantity(quantity)
     if s.get(Product, product_id) is None:
@@ -92,6 +98,7 @@ def receive_in_tx(s: Session, warehouse_id: int, product_id: int, quantity: int)
         product_id=product_id,
         quantity=quantity,
         dest_warehouse_id=warehouse_id,
+        idempotency_key=idempotency_key,
     )
     s.add(op)
     s.flush()
@@ -125,6 +132,12 @@ def require_available(s: Session, inv: Inventory, wh: Warehouse, quantity: int) 
     raise InsufficientStock(msg)
 
 
-def receive(s: Session, warehouse_id: int, product_id: int, quantity: int) -> Operation:
+def receive(
+    s: Session,
+    warehouse_id: int,
+    product_id: int,
+    quantity: int,
+    idempotency_key: str | None = None,
+) -> Operation:
     with atomic(s):
-        return receive_in_tx(s, warehouse_id, product_id, quantity)
+        return receive_in_tx(s, warehouse_id, product_id, quantity, idempotency_key)

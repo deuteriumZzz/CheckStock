@@ -4,14 +4,16 @@
 from collections.abc import Iterator
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, Query
 from pydantic import BaseModel, ConfigDict, StrictInt
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
+from app.models import FBO, FBS, RECEIPT, TRANSFER
 from app.services import fbs, queries, shipments
 from app.services import warehouses as wh_service
 from app.services.adjustments import adjust_stock
+from app.services.idempotency import run_idempotent, same_adjustment, same_request
 from app.services.stock import receive
 
 router = APIRouter(prefix="/api")
@@ -23,6 +25,15 @@ def get_session() -> Iterator[Session]:
 
 
 Db = Annotated[Session, Depends(get_session)]
+IdemKey = Annotated[
+    str | None,
+    Header(
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=128,
+        description="Необязательный ключ повтора: тот же ключ не создаёт вторую операцию.",
+    ),
+]
 
 
 # --- схемы. StrictInt: "5", 5.0 и true отклоняются на входе, а не молча приводятся ---
@@ -125,19 +136,38 @@ def archive_warehouse(warehouse_id: int, s: Db):
 
 
 @router.post("/receipts", status_code=201, response_model=OperationOut)
-def create_receipt(body: StockCommand, s: Db):
-    return receive(s, body.warehouse_id, body.product_id, body.quantity)
+def create_receipt(body: StockCommand, s: Db, key: IdemKey = None):
+    return run_idempotent(
+        s,
+        key,
+        lambda k: receive(s, body.warehouse_id, body.product_id, body.quantity, k),
+        lambda op: same_request(
+            op, RECEIPT, body.product_id, body.quantity, None, body.warehouse_id
+        ),
+    )
 
 
 @router.post("/adjustments", status_code=201, response_model=OperationOut)
-def create_adjustment(body: AdjustCommand, s: Db):
+def create_adjustment(body: AdjustCommand, s: Db, key: IdemKey = None):
     """Исправить остаток по факту пересчёта: разница с причиной попадает в историю."""
-    return adjust_stock(s, body.warehouse_id, body.product_id, body.new_on_hand, body.reason)
+    return run_idempotent(
+        s,
+        key,
+        lambda k: adjust_stock(
+            s, body.warehouse_id, body.product_id, body.new_on_hand, body.reason, k
+        ),
+        lambda op: same_adjustment(op, body.warehouse_id, body.product_id, body.reason),
+    )
 
 
 @router.post("/fbs/reservations", status_code=201, response_model=OperationOut)
-def reserve(body: StockCommand, s: Db):
-    return fbs.reserve_fbs(s, body.warehouse_id, body.product_id, body.quantity)
+def reserve(body: StockCommand, s: Db, key: IdemKey = None):
+    return run_idempotent(
+        s,
+        key,
+        lambda k: fbs.reserve_fbs(s, body.warehouse_id, body.product_id, body.quantity, k),
+        lambda op: same_request(op, FBS, body.product_id, body.quantity, body.warehouse_id),
+    )
 
 
 @router.post("/fbs/{operation_id}/cancel", response_model=OperationOut)
@@ -151,8 +181,17 @@ def ship_fbs(operation_id: int, s: Db):
 
 
 @router.post("/transfers", status_code=201, response_model=OperationOut)
-def create_transfer(body: TransferCommand, s: Db):
-    return shipments.ship_transfer(s, body.source_id, body.dest_id, body.product_id, body.quantity)
+def create_transfer(body: TransferCommand, s: Db, key: IdemKey = None):
+    return run_idempotent(
+        s,
+        key,
+        lambda k: shipments.ship_transfer(
+            s, body.source_id, body.dest_id, body.product_id, body.quantity, k
+        ),
+        lambda op: same_request(
+            op, TRANSFER, body.product_id, body.quantity, body.source_id, body.dest_id
+        ),
+    )
 
 
 @router.post("/transfers/{operation_id}/receive", response_model=OperationOut)
@@ -161,8 +200,13 @@ def receive_transfer(operation_id: int, s: Db):
 
 
 @router.post("/fbo", status_code=201, response_model=OperationOut)
-def create_fbo(body: StockCommand, s: Db):
-    return shipments.ship_fbo(s, body.warehouse_id, body.product_id, body.quantity)
+def create_fbo(body: StockCommand, s: Db, key: IdemKey = None):
+    return run_idempotent(
+        s,
+        key,
+        lambda k: shipments.ship_fbo(s, body.warehouse_id, body.product_id, body.quantity, k),
+        lambda op: same_request(op, FBO, body.product_id, body.quantity, body.warehouse_id),
+    )
 
 
 @router.post("/fbo/{operation_id}/receive", response_model=OperationOut)

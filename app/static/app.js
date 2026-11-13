@@ -32,10 +32,13 @@ const ACTIONS = {
   adjust: { icon: "pencil", tone: "mute", title: "Исправить остаток", short: "Исправить", sub: "Ввести количество по факту пересчёта", submit: "Сохранить остаток", ok: "Остаток исправлен" },
 };
 
-async function api(path, method = "GET", body) {
+// Ключ повтора: одна открытая форма операции = один ключ, повторная отправка не создаст дубль.
+const newKey = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+
+async function api(path, method = "GET", body, extra = {}) {
   const res = await fetch("/api" + path, {
     method,
-    headers: body ? { "Content-Type": "application/json" } : {},
+    headers: body ? { "Content-Type": "application/json", ...extra } : extra,
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json().catch(() => null);
@@ -318,7 +321,10 @@ function syncDialog(resetQty) {
   $("ad-avail").textContent = `На «${wh.name}»: на складе ${c.on_hand}, в резерве ${c.reserved}, доступно ${c.available}`;
   $("ad-max").hidden = !a.needs;
   $("ad-max").textContent = `Всё: ${c.available}`;
-  if (resetQty) $("ad-qty").value = state.kind === "adjust" ? c.on_hand : "";
+  if (resetQty) {
+    $("ad-qty").value = state.kind === "adjust" ? c.on_hand : "";
+    state.idem = newKey(); // новая форма или новые товар/склад/тип — новый ключ
+  }
 }
 
 function setKind(kind) {
@@ -382,7 +388,8 @@ $("ad-form").addEventListener("submit", (e) => {
     adjust: ["/adjustments", { warehouse_id: wh.id, product_id: product.id, new_on_hand: quantity, reason: $("ad-reason").value }],
   };
   const [path, body] = calls[state.kind];
-  act(() => api(path, "POST", body), a.ok, err).then((ok) => { if (ok) $("ad-dialog").close(); });
+  act(() => api(path, "POST", body, { "Idempotency-Key": state.idem }), a.ok, err)
+    .then((ok) => { if (ok) $("ad-dialog").close(); });
 });
 
 /* --- свой диалог подтверждения вместо confirm()/prompt() --- */

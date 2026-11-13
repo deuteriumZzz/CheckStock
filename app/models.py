@@ -76,7 +76,10 @@ class Operation(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
     note: Mapped[str | None] = mapped_column(String(255))  # причина корректировки
+    # Ключ повтора от клиента: тот же ключ не создаёт вторую операцию (см. services/idempotency.py).
+    idempotency_key: Mapped[str | None] = mapped_column(String(128))
     __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_operations_idempotency_key"),
         CheckConstraint("quantity > 0", name="quantity_positive"),
         CheckConstraint(
             "type IN ('RECEIPT','TRANSFER','FBS','FBO','ADJUSTMENT')", name="type_valid"

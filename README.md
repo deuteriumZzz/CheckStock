@@ -40,7 +40,7 @@ uv run uvicorn app.main:app --reload    # http://localhost:8000
 ```
 
 ```bash
-uv run pytest                           # 83 теста на настоящем PostgreSQL
+uv run pytest                           # 90 тестов на настоящем PostgreSQL
 uv run ruff check . && uv run ruff format --check .
 ```
 
@@ -57,6 +57,7 @@ uv run ruff check . && uv run ruff format --check .
 | Нехватка на выбранном ФФ | `test_fbs.py::test_shortage_on_chosen_warehouse_with_enough_total`, `test_shipments.py::test_fbo_shortage_does_not_pick_other_warehouse` | зарезервировать 8 из 10 на Севере, затем ещё 5: отказ с подсказкой «Юг 6» |
 | Удаление ФФ с остатком | `test_warehouses.py::test_archive_warehouse_with_stock_keeps_everything`, `test_archived_warehouse_rejects_new_operations_but_allows_evacuation`, `test_cannot_archive_with_active_reservation` | «Склады» → «Удалить» у склада с товаром: склад в архиве, остаток виден |
 | Повторное подтверждение | `test_fbs.py::test_double_ship_does_not_write_off_twice`, `test_shipments.py::test_double_receive_does_not_add_stock_twice`, `test_api.py::test_double_confirmation_over_http` | в Swagger (`/docs`) вызвать `POST /api/fbs/{id}/ship` дважды: второй ответ 409 |
+| Повторный запрос создания | `test_idempotency.py` (7 тестов, в том числе 8 параллельных одинаковых запросов) | отправить `POST /api/transfers` дважды с одним `Idempotency-Key`: оба ответа с одним `id`, товар списан один раз |
 | Одновременные запросы | `test_concurrency.py` (10 тестов), например `test_parallel_double_ship_writes_off_once` | `uv run pytest tests/test_concurrency.py -v` |
 
 ## Как пользоваться
@@ -126,6 +127,15 @@ API вернёт понятный 409 «повторите действие», �
 остатки, «в пути»), история и список операций — по одному запросу с `JOIN` (тесты считают запросы).
 «В пути» читается агрегатом по частичному индексу `WHERE status = 'IN_TRANSIT'`.
 
+**11. Повторный запрос создания не создаёт дубль.** Перемещение и FBO не имеют черновика: само
+создание уже списывает товар, поэтому двойной клик или повтор после обрыва сети списал бы дважды.
+Команды создания (приход, резерв, перемещение, FBO, корректировка) принимают заголовок
+`Idempotency-Key`; интерфейс шлёт его сам (UUID на каждую открытую форму). Ключ хранится в самой
+операции под уникальным индексом (`services/idempotency.py`): повтор с тем же ключом возвращает
+уже созданную операцию, тот же ключ с другим телом даёт 409, а два одинаковых запроса одновременно
+не пройдут оба: база пропустит один, проигравший откатывается целиком. Неудачный запрос (например,
+нехватка) ключ не «сжигает». Без заголовка команда работает как раньше.
+
 ## Модель данных
 
 | Таблица | Содержимое |
@@ -133,7 +143,7 @@ API вернёт понятный 409 «повторите действие», �
 | `products` | артикул, название |
 | `warehouses` | название, `archived_at` |
 | `inventory` | (товар, склад) → `on_hand`, `reserved` |
-| `operations` | тип (`RECEIPT`, `TRANSFER`, `FBS`, `FBO`, `ADJUSTMENT`), статус, товар, количество, склад отправления и назначения, причина |
+| `operations` | тип (`RECEIPT`, `TRANSFER`, `FBS`, `FBO`, `ADJUSTMENT`), статус, товар, количество, склад отправления и назначения, причина, ключ повтора |
 | `events` | история: тип события, товар, количество, откуда, куда, время |
 
 Резерв FBS — это операция типа `FBS` в статусе `ACTIVE`; `inventory.reserved` всегда равен сумме
@@ -167,7 +177,8 @@ SELECT count(*) AS mismatches FROM inventory i
 Swagger — `/docs`. Ошибки всегда в одном формате:
 `{"error": {"code": "...", "message": "..."}}`, коды: `validation_error` (422), `not_found` (404),
 `conflict` (409), `insufficient_stock` (409), `concurrent_conflict` (409), `internal_error` (500).
-Числа принимаются строго как целые (`"5"`, `5.5`, `true` отклоняются).
+Числа принимаются строго как целые (`"5"`, `5.5`, `true` отклоняются). Команды создания принимают
+необязательный заголовок `Idempotency-Key` (решение 11).
 
 Полный список методов — в Swagger. Чтение: `GET /api/stock`, `/operations/open`, `/history`,
 `/warehouses`. Команды: `POST /api/receipts`, `/fbs/reservations`, `/fbs/{id}/cancel|ship`,
@@ -192,8 +203,8 @@ Swagger — `/docs`. Ошибки всегда в одном формате:
 
 * Операция относится к одному артикулу; поставка из нескольких артикулов оформляется несколькими
   операциями. Расширение до таблицы позиций (`operation_items`) возможно, но усложнит блокировки.
-* Защиты от дубля при повторе запроса **создания** (`Idempotency-Key`) нет: повторное
-  **подтверждение** защищено статусами и блокировками, этого требует ТЗ.
+* `Idempotency-Key` необязателен и хранится вместе с операцией без срока давности (нет очистки);
+  для создания склада ключ не нужен: его защищает уникальное имя.
 * Резерв отправляется целиком, без частичных отправок; возвратов нет.
 * Нет авторизации, пагинации истории (последние N записей), реальных API маркетплейсов.
 

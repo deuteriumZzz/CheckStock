@@ -17,7 +17,13 @@ from app.services.stock import (
 
 
 def _dispatch(
-    s: Session, op_type: str, source: Warehouse, product_id: int, quantity: int, dest_id=None
+    s: Session,
+    op_type: str,
+    source: Warehouse,
+    product_id: int,
+    quantity: int,
+    dest_id=None,
+    idempotency_key: str | None = None,
 ) -> Operation:
     """Блокируем остаток, проверяем доступное, списываем и создаём операцию в пути."""
     inv = lock_inventory(s, product_id, source.id)
@@ -31,6 +37,7 @@ def _dispatch(
         quantity=quantity,
         source_warehouse_id=source.id,
         dest_warehouse_id=dest_id,
+        idempotency_key=idempotency_key,
     )
     s.add(op)
     s.flush()
@@ -52,7 +59,12 @@ def _lock_in_transit(s: Session, operation_id: int, op_type: str) -> Operation:
 
 
 def ship_transfer(
-    s: Session, source_id: int, dest_id: int, product_id: int, quantity: int
+    s: Session,
+    source_id: int,
+    dest_id: int,
+    product_id: int,
+    quantity: int,
+    idempotency_key: str | None = None,
 ) -> Operation:
     """Отправка перемещения: остаток отправителя уменьшается, у получателя пока ничего.
     Склад-источник может быть архивным (вывоз остатка); получатель — только активный."""
@@ -66,7 +78,7 @@ def ship_transfer(
         if source is None:
             raise NotFound(f"Склад {source_id} не найден")
         get_active_warehouse(s, dest_id)
-        return _dispatch(s, TRANSFER, source, product_id, quantity, dest_id)
+        return _dispatch(s, TRANSFER, source, product_id, quantity, dest_id, idempotency_key)
 
 
 def receive_transfer(s: Session, operation_id: int) -> Operation:
@@ -88,14 +100,20 @@ def receive_transfer(s: Session, operation_id: int) -> Operation:
         return op
 
 
-def ship_fbo(s: Session, warehouse_id: int, product_id: int, quantity: int) -> Operation:
+def ship_fbo(
+    s: Session,
+    warehouse_id: int,
+    product_id: int,
+    quantity: int,
+    idempotency_key: str | None = None,
+) -> Operation:
     """Отправка на склад маркетплейса: ФФ списывается сразу, товар числится в пути до приёмки."""
     with atomic(s):
         check_quantity(quantity)
         if s.get(Product, product_id) is None:
             raise NotFound(f"Товар {product_id} не найден")
         source = get_active_warehouse(s, warehouse_id)
-        return _dispatch(s, FBO, source, product_id, quantity)
+        return _dispatch(s, FBO, source, product_id, quantity, None, idempotency_key)
 
 
 def receive_fbo(s: Session, operation_id: int) -> Operation:

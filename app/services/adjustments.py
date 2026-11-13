@@ -11,7 +11,12 @@ from app.services.stock import get_active_warehouse, lock_inventory, log_event
 
 
 def adjust_stock(
-    s: Session, warehouse_id: int, product_id: int, new_on_hand: int, reason: str
+    s: Session,
+    warehouse_id: int,
+    product_id: int,
+    new_on_hand: int,
+    reason: str,
+    idempotency_key: str | None = None,
 ) -> Operation:
     if not isinstance(new_on_hand, int) or isinstance(new_on_hand, bool) or new_on_hand < 0:
         raise ValidationError("Фактическое количество должно быть целым числом, не меньше нуля")
@@ -46,6 +51,7 @@ def adjust_stock(
             dest_warehouse_id=warehouse_id if increase else None,
             source_warehouse_id=None if increase else warehouse_id,
             note=reason,
+            idempotency_key=idempotency_key,
         )
         s.add(op)
         s.flush()

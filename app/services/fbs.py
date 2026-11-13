@@ -13,7 +13,13 @@ from app.services.stock import (
 )
 
 
-def reserve_fbs(s: Session, warehouse_id: int, product_id: int, quantity: int) -> Operation:
+def reserve_fbs(
+    s: Session,
+    warehouse_id: int,
+    product_id: int,
+    quantity: int,
+    idempotency_key: str | None = None,
+) -> Operation:
     """Резерв блокирует товар на ФФ: on_hand не меняется, растёт reserved."""
     with atomic(s):
         check_quantity(quantity)
@@ -31,6 +37,7 @@ def reserve_fbs(s: Session, warehouse_id: int, product_id: int, quantity: int) -
             product_id=product_id,
             quantity=quantity,
             source_warehouse_id=warehouse_id,
+            idempotency_key=idempotency_key,
         )
         s.add(op)
         s.flush()
